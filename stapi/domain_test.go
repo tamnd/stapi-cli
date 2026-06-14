@@ -6,9 +6,9 @@ import (
 	"github.com/tamnd/any-cli/kit"
 )
 
-// These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in stapi_test.go.
+// These tests are offline: they exercise the URI driver's pure string
+// functions and the host wiring (mint, body, resolve), which need no network.
+// The client's HTTP behaviour is covered in stapi_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -24,53 +24,125 @@ func TestDomainInfo(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+	cases := []struct {
+		in  string
+		typ string
+		id  string
+	}{
+		{"CHMA0000215045", "character", "CHMA0000215045"},
+		{"EPMA0000001458", "episode", "EPMA0000001458"},
+		{"SEMA0000000001", "series", "SEMA0000000001"},
+		{"something-else", "query", "something-else"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
+		if err != nil {
+			t.Errorf("Classify(%q) returned error: %v", tc.in, err)
+			continue
+		}
+		if typ != tc.typ || id != tc.id {
+			t.Errorf("Classify(%q) = (%q, %q), want (%q, %q)",
+				tc.in, typ, id, tc.typ, tc.id)
 		}
 	}
 }
 
-func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+func TestClassifyEmpty(t *testing.T) {
+	_, _, err := Domain{}.Classify("")
+	if err == nil {
+		t.Error("Classify(\"\") should return an error")
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
+func TestLocate(t *testing.T) {
+	cases := []struct {
+		typ  string
+		id   string
+		want string
+	}{
+		{"character", "CHMA0000215045", "https://www.star-trek.com/character/CHMA0000215045"},
+		{"episode", "EPMA0000001458", BaseURL + "/api/v1/rest/episode?uid=EPMA0000001458"},
+		{"series", "SEMA0000000001", BaseURL + "/api/v1/rest/series?uid=SEMA0000000001"},
+	}
+	for _, tc := range cases {
+		got, err := Domain{}.Locate(tc.typ, tc.id)
+		if err != nil || got != tc.want {
+			t.Errorf("Locate(%q, %q) = (%q, %v), want (%q, nil)",
+				tc.typ, tc.id, got, err, tc.want)
+		}
+	}
+}
+
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("unknown", "X")
+	if err == nil {
+		t.Error("Locate with unknown type should return an error")
+	}
+}
+
 func TestHostWiring(t *testing.T) {
 	h, err := kit.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
+	ch := &Character{UID: "CHMA0000215045", Name: "Spock"}
+	u, err := h.Mint(ch)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if want := "stapi://page/wiki/Go"; u.String() != want {
+	if want := "stapi://character/CHMA0000215045"; u.String() != want {
 		t.Errorf("Mint = %q, want %q", u.String(), want)
 	}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
+	got, err := h.ResolveOn("stapi", "EPMA0000001458")
+	if err != nil || got.String() != "stapi://episode/EPMA0000001458" {
+		t.Errorf("ResolveOn = (%q, %v), want stapi://episode/EPMA0000001458", got.String(), err)
 	}
+}
 
-	got, err := h.ResolveOn("stapi", "about")
-	if err != nil || got.String() != "stapi://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want stapi://page/about", got.String(), err)
+func TestFromWireCharacter(t *testing.T) {
+	w := wireCharacter{
+		UID:                "CHMA0000215045",
+		Name:               "Spock",
+		Gender:             "M",
+		Deceased:           false,
+		Hologram:           false,
+		FictionalCharacter: false,
+		Mirror:             false,
+	}
+	ch := fromWireCharacter(w)
+	if ch.UID != w.UID {
+		t.Errorf("UID = %q, want %q", ch.UID, w.UID)
+	}
+	if ch.Name != w.Name {
+		t.Errorf("Name = %q, want %q", ch.Name, w.Name)
+	}
+	if ch.Gender != w.Gender {
+		t.Errorf("Gender = %q, want %q", ch.Gender, w.Gender)
+	}
+}
+
+func TestFromWireEpisode(t *testing.T) {
+	w := wireEpisode{
+		UID:           "EPMA0000001458",
+		Title:         "All Good Things...",
+		SeasonNumber:  7,
+		EpisodeNumber: 25,
+		FeatureLength: true,
+	}
+	w.Series.Title = "Star Trek: The Next Generation"
+	ep := fromWireEpisode(w)
+	if ep.UID != w.UID {
+		t.Errorf("UID = %q, want %q", ep.UID, w.UID)
+	}
+	if ep.Series != "Star Trek: The Next Generation" {
+		t.Errorf("Series = %q, want %q", ep.Series, "Star Trek: The Next Generation")
+	}
+	if ep.SeasonNumber != 7 {
+		t.Errorf("SeasonNumber = %d, want 7", ep.SeasonNumber)
+	}
+	if !ep.FeatureLength {
+		t.Error("FeatureLength should be true")
 	}
 }

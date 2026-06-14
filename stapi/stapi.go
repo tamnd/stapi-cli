@@ -1,35 +1,31 @@
 // Package stapi is the library behind the stapi command line:
-// the HTTP client, request shaping, and the typed data models for stapi.
+// the HTTP client, request shaping, and the typed data models for the
+// Star Trek API (stapi.co).
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
 // transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
 package stapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to stapi. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "stapi/dev (+https://github.com/tamnd/stapi-cli)"
+// DefaultUserAgent identifies the client to stapi.co.
+const DefaultUserAgent = "stapi-cli/dev (+https://github.com/tamnd/stapi-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at stapi.com; change it once you
-// know the real endpoints you want to read.
-const Host = "stapi.com"
+// Host is the site this client talks to.
+const Host = "stapi.co"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to stapi over HTTP.
+// Client talks to stapi.co over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -40,13 +36,13 @@ type Client struct {
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
+// NewClient returns a Client with sensible defaults: a 30s timeout, a 300ms
 // minimum gap between requests, and five retries on transient errors.
 func NewClient() *Client {
 	return &Client{
 		HTTP:      &http.Client{Timeout: 30 * time.Second},
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
+		Rate:      300 * time.Millisecond,
 		Retries:   5,
 	}
 }
@@ -83,6 +79,7 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 		return nil, false, err
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -123,78 +120,205 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on stapi.com. It is a stand-in for the typed records you
-// will model from the real stapi endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `stapi cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// --- output types ---
+
+// Character is a Star Trek character.
+type Character struct {
+	UID                string `kit:"id" json:"uid"`
+	Name               string `json:"name"`
+	Gender             string `json:"gender"`
+	Deceased           bool   `json:"deceased"`
+	Hologram           bool   `json:"hologram"`
+	FictionalCharacter bool   `json:"fictionalCharacter"`
+	Mirror             bool   `json:"mirror"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// Episode is a Star Trek episode.
+type Episode struct {
+	UID           string `kit:"id" json:"uid"`
+	Title         string `json:"title"`
+	Series        string `json:"series"` // extracted from series.title
+	SeasonNumber  int    `json:"seasonNumber"`
+	EpisodeNumber int    `json:"episodeNumber"`
+	FeatureLength bool   `json:"featureLength"`
+}
+
+// Series is a Star Trek series.
+type Series struct {
+	UID          string `kit:"id" json:"uid"`
+	Title        string `json:"title"`
+	Abbreviation string `json:"abbreviation"`
+}
+
+// --- wire types ---
+
+type pageInfo struct {
+	PageNumber    int `json:"pageNumber"`
+	TotalElements int `json:"totalElements"`
+	TotalPages    int `json:"totalPages"`
+}
+
+type wireCharacter struct {
+	UID                string `json:"uid"`
+	Name               string `json:"name"`
+	Gender             string `json:"gender"`
+	Deceased           bool   `json:"deceased"`
+	Hologram           bool   `json:"hologram"`
+	FictionalCharacter bool   `json:"fictionalCharacter"`
+	Mirror             bool   `json:"mirror"`
+}
+
+type wireEpisode struct {
+	UID    string `json:"uid"`
+	Title  string `json:"title"`
+	Series struct {
+		Title string `json:"title"`
+	} `json:"series"`
+	SeasonNumber  int  `json:"seasonNumber"`
+	EpisodeNumber int  `json:"episodeNumber"`
+	FeatureLength bool `json:"featureLength"`
+}
+
+type wireSeries struct {
+	UID          string `json:"uid"`
+	Title        string `json:"title"`
+	Abbreviation string `json:"abbreviation"`
+}
+
+type charSearchResponse struct {
+	Page       pageInfo        `json:"page"`
+	Characters []wireCharacter `json:"characters"`
+}
+
+type episodeSearchResponse struct {
+	Page     pageInfo      `json:"page"`
+	Episodes []wireEpisode `json:"episodes"`
+}
+
+type seriesSearchResponse struct {
+	Page   pageInfo     `json:"page"`
+	Series []wireSeries `json:"series"`
+}
+
+type charResponse struct {
+	Character wireCharacter `json:"character"`
+}
+
+type episodeResponse struct {
+	Episode wireEpisode `json:"episode"`
+}
+
+// --- conversion helpers ---
+
+func fromWireCharacter(w wireCharacter) Character {
+	return Character{
+		UID:                w.UID,
+		Name:               w.Name,
+		Gender:             w.Gender,
+		Deceased:           w.Deceased,
+		Hologram:           w.Hologram,
+		FictionalCharacter: w.FictionalCharacter,
+		Mirror:             w.Mirror,
+	}
+}
+
+func fromWireEpisode(w wireEpisode) Episode {
+	return Episode{
+		UID:           w.UID,
+		Title:         w.Title,
+		Series:        w.Series.Title,
+		SeasonNumber:  w.SeasonNumber,
+		EpisodeNumber: w.EpisodeNumber,
+		FeatureLength: w.FeatureLength,
+	}
+}
+
+// --- client methods ---
+
+// ListCharacters fetches a page of characters from the search endpoint.
+func (c *Client) ListCharacters(ctx context.Context, limit int) ([]Character, error) {
+	url := fmt.Sprintf("%s/api/v1/rest/character/search?pageSize=%d", BaseURL, limit)
+	b, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var resp charSearchResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("decode characters: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]Character, 0, len(resp.Characters))
+	for _, w := range resp.Characters {
+		out = append(out, fromWireCharacter(w))
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+// GetCharacter fetches a single character by UID.
+func (c *Client) GetCharacter(ctx context.Context, uid string) (*Character, error) {
+	url := fmt.Sprintf("%s/api/v1/rest/character?uid=%s", BaseURL, uid)
+	b, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var resp charResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("decode character: %w", err)
+	}
+	ch := fromWireCharacter(resp.Character)
+	return &ch, nil
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// ListEpisodes fetches a page of episodes from the search endpoint.
+func (c *Client) ListEpisodes(ctx context.Context, limit int) ([]Episode, error) {
+	url := fmt.Sprintf("%s/api/v1/rest/episode/search?pageSize=%d", BaseURL, limit)
+	b, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	var resp episodeSearchResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("decode episodes: %w", err)
+	}
+	out := make([]Episode, 0, len(resp.Episodes))
+	for _, w := range resp.Episodes {
+		out = append(out, fromWireEpisode(w))
+	}
+	return out, nil
+}
+
+// GetEpisode fetches a single episode by UID.
+func (c *Client) GetEpisode(ctx context.Context, uid string) (*Episode, error) {
+	url := fmt.Sprintf("%s/api/v1/rest/episode?uid=%s", BaseURL, uid)
+	b, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var resp episodeResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("decode episode: %w", err)
+	}
+	ep := fromWireEpisode(resp.Episode)
+	return &ep, nil
+}
+
+// ListSeries fetches all Star Trek series.
+func (c *Client) ListSeries(ctx context.Context) ([]Series, error) {
+	url := fmt.Sprintf("%s/api/v1/rest/series/search?pageSize=20", BaseURL)
+	b, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var resp seriesSearchResponse
+	if err := json.Unmarshal(b, &resp); err != nil {
+		return nil, fmt.Errorf("decode series: %w", err)
+	}
+	out := make([]Series, 0, len(resp.Series))
+	for _, w := range resp.Series {
+		out = append(out, Series{
+			UID:          w.UID,
+			Title:        w.Title,
+			Abbreviation: w.Abbreviation,
+		})
+	}
+	return out, nil
 }
